@@ -1,0 +1,62 @@
+# broadcast_qc.sh — System Requirements
+# =======================================
+# This is a bash script. Dependencies are system binaries, not Python packages.
+# Install missing tools using winget, Scoop, or the linked installers.
+
+# ---------------------------------------------------------------------------
+# REQUIRED
+# ---------------------------------------------------------------------------
+
+bash >= 4.0
+# Windows: Git for Windows ships bash 5.x (recommended)
+# winget install Git.Git
+
+ffmpeg (Topaz Video AI build)
+# Path: C:\Program Files\Topaz Labs LLC\Topaz Video AI\ffmpeg.exe
+# Required for: all QC checks (signalstats, ebur128, blackdetect,
+#               freezedetect, idet, file probe)
+# Install: https://www.topazlabs.com/topaz-video-ai
+
+awk
+# Required for: signal stats aggregation, loudness threshold math
+# Bundled with Git for Windows (gawk) — no separate install needed
+
+# ---------------------------------------------------------------------------
+# OPTIONAL — RECOMMENDED
+# ---------------------------------------------------------------------------
+
+ffmpeg (standalone build, with cropdetect)
+# Required for: crop detection (cropdetect filter)
+# The Topaz build lacks cropdetect; a separate ffmpeg provides it
+# Auto-detected from: C:\ffmpeg\bin\, OBS, Overwolf, PATH
+# Install: winget install Gyan.FFmpeg
+#   or:    https://ffmpeg.org/download.html
+
+pdftotext (poppler-utils)
+# Required for: parsing PDF delivery spec documents (option 2 in spec prompt)
+# Falls back to `strings` if not installed (less accurate)
+# Install: winget install poppler
+#   or:    scoop install poppler
+
+# ---------------------------------------------------------------------------
+# STANDARD UNIX UTILITIES (bundled with Git for Windows / WSL)
+# ---------------------------------------------------------------------------
+
+sed          # stream text processing
+grep         # pattern matching
+sort         # output sorting
+uniq         # deduplication (cropdetect consensus)
+find         # locating cropdetect-capable ffmpeg binaries
+timeout      # per-check execution time limit (FFMPEG_TIMEOUT=300s)
+strings      # fallback PDF text extraction (MinGW/Git for Windows)
+command      # shell built-in, checks binary availability
+mkdir        # output directory creation
+
+# ---------------------------------------------------------------------------
+# NOTES
+# ---------------------------------------------------------------------------
+# - All standard utilities are included with Git for Windows (git-bash)
+#   No additional installation required if running in git-bash
+# - `timeout` may not be present in all MinGW environments;
+#   the script detects its absence and runs without it
+# - `pdftotext` is only needed if you load spec constraints from a PDF file
