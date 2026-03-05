@@ -1,0 +1,496 @@
+================================================================================
+
+  BROADCAST QC SCRIPT — WHAT IT IS, HOW IT WORKS, AND WHY IT'S USEFUL
+  broadcast_qc.sh  |  v4.1  |  Last updated: 2026-03-05
+
+================================================================================
+
+
+================================================================================
+  OVERVIEW
+================================================================================
+
+  broadcast_qc.sh is a fully automated broadcast quality control (QC) pipeline
+  for video files. It takes any video file — a ProRes commercial, an H.264 web
+  export, a colour reference package — and runs it through a battery of technical
+  checks modelled on real broadcast delivery standards, specifically the Extreme
+  Reach (XR) North America specification used by US and Canadian broadcasters.
+
+  The output is a plain-text QC report with a clear PASS / FLAG / FAIL verdict
+  for every check, plus a final verdict for the whole file.
+
+  It is designed for post-production workflows where:
+    • Files must meet precise technical specs before delivery to a broadcaster
+    • Multiple deliverables need to be checked consistently every time
+    • You want an objective record of what was checked and why something failed
+
+  The script is written in Bash and runs on any system with ffmpeg available.
+  On Windows it runs in Git Bash.
+
+
+================================================================================
+  WHY BROADCAST QC MATTERS
+================================================================================
+
+  Broadcasters like ABC, NBC, CBS, FOX, and their Canadian equivalents receive
+  files via traffic distribution platforms (Extreme Reach,etc.)
+  and run their own automated ingest QC. If your file fails their checks, it gets
+  rejected — sometimes silently, sometimes at the last minute before air.
+
+  Common rejection reasons that this script catches:
+    • Wrong resolution or frame rate (spec mismatch)
+    • Audio too loud or too quiet (ATSC A/85 / EBU R128 non-compliance)
+    • Audio clipping (sample peak above 0 dBFS)
+    • Illegal luma values (blacks too deep, whites too bright for broadcast signal)
+    • File encoded in full range instead of legal range
+    • Color space metadata missing or tagged as 'unknown'
+    • Codec or pixel format wrong (e.g. H.264 instead of ProRes)
+    • Pillarbox or letterbox borders accidentally rendered in
+    • Interlaced content where progressive is required
+    • Frozen frames or black sections that shouldn't be there
+
+  Catching these before delivery — not after rejection — saves time, prevents
+  re-renders, and avoids airing the wrong version of an ad.
+
+
+================================================================================
+  HOW THE SCRIPT IS STRUCTURED
+================================================================================
+
+  The script is divided into these main sections:
+
+  1. FFMPEG BINARY DISCOVERY
+     ─────────────────────────────────────────────────────────────────────────
+     The script needs two ffmpeg builds:
+
+       Primary (all analysis):
+         The Topaz Video AI ffmpeg build. This is already installed on the
+         machine and supports the signal analysis filters (signalstats, ebur128,
+         idet, blackdetect, freezedetect). It does NOT support the cropdetect
+         filter reliably.
+
+       Cropdetect (border detection):
+         A second ffmpeg is found dynamically by scanning a list of known
+         locations (standalone installs, OBS, Overwolf). It searches
+         automatically — if you update OBS, the script still finds the new
+         build because it scans the folder, not a hardcoded path.
+
+     This dual-binary approach is intentional. It means the script continues
+     to work even if only one build is present, and it degrades gracefully —
+     if no cropdetect binary is found, that section is skipped with a warning
+     rather than crashing the whole run.
+
+  2. SPEC CONFIGURATION (prompt_spec)
+     ─────────────────────────────────────────────────────────────────────────
+     Every time the script runs interactively, it asks what spec to check
+     against. You have four options:
+
+       1) XR North America preset
+          All values pre-filled from the Extreme Reach US+CA broadcast spec:
+            1920x1080, 23.98fps, ProRes 422HQ, yuv422p10le
+            PCM 48kHz stereo, -24 LUFS, -2 dBTP true peak
+            EBU Rec.103-2000 BRNG tolerance (1% of active picture)
+
+       2) Load from file
+          Accepts a previously saved .conf file (instant load), or a PDF or
+          TXT document that it parses with grep-based pattern extraction.
+          The PDF parser looks for values like "1920 x 1080", "23.98 fps",
+          "-24 LUFS", "-2 dBTP", "PCM", "stereo" etc.
+
+       3) Custom
+          Enter every field manually. Leave a field blank to skip that check.
+          Useful for one-off specs or specs that don't have a preset.
+
+       4) Skip
+          Run in observe-only mode — all checks execute and report values
+          but nothing is evaluated as a pass or fail against constraints.
+          Useful for profiling an unknown file before you know what spec to
+          check against.
+
+     After setting up, you're offered the option to save those constraints to
+     a .conf file for instant reloading next time.
+
+     Non-interactive / batch use bypasses this prompt entirely:
+       --preset xr_na         loads the XR NA preset and starts immediately
+       --spec file.conf       loads a saved config file
+
+  3. VERDICT ESCALATION
+     ─────────────────────────────────────────────────────────────────────────
+     The verdict system is monotonic — it can only go up, never down:
+
+       PASS → FLAG → FAIL
+
+     Each check calls escalate(FLAG) or escalate(FAIL). Once FAIL is set, no
+     subsequent passing check can bring it back to FLAG or PASS. This means
+     the final verdict always reflects the worst thing found.
+
+     PASS   — All checks clean. File can be delivered.
+     FLAG   — Something needs human review. May not be a rejection, but must
+              be confirmed. Examples: slightly high BRNG, freeze in a file
+              that might have a title card, loudness near the edge of tolerance.
+     FAIL   — Hard spec violation. Will be rejected at delivery. Examples:
+              wrong resolution, clipping audio, out-of-legal-range luma.
+
+
+================================================================================
+  QC CHECKS — DETAILED EXPLANATION
+================================================================================
+
+  ── 1. FILE INFO ──────────────────────────────────────────────────────────────
+
+  The script runs ffmpeg -i on the file to get all stream metadata. This is
+  the foundation for everything else — duration, resolution, frame rate, pixel
+  format (which determines whether the file is 8-bit or 10-bit), codec, and
+  audio stream details.
+
+  The bit depth is inferred from the pixel format string (e.g. yuv422p10le →
+  10-bit). This controls which luma legal range is used in signal stats:
+
+    8-bit:   legal luma  16 – 235
+    10-bit:  legal luma  64 – 940
+    12-bit:  legal luma  256 – 3760
+
+  All streams are listed, including data streams (e.g. timecode track), so you
+  can verify nothing unexpected is embedded.
+
+
+  ── 2. SPEC VALIDATION ────────────────────────────────────────────────────────
+
+  Compares the file's actual values against the constraints you set:
+
+    Width / Height      — FAIL if wrong (resolution is a hard requirement)
+    Frame rate          — FLAG if wrong (some broadcasters are flexible)
+    Codec               — FAIL if wrong (ProRes vs H.264 is non-negotiable)
+    Pixel format        — FAIL if wrong (8-bit vs 10-bit, 4:2:0 vs 4:2:2)
+
+  Resolution and codec mismatches are hard FAILs because broadcasters have
+  strict ingest requirements. Frame rate is flagged rather than failed because
+  some specs accept both 23.98 and 24, or both 29.97 and 30.
+
+
+  ── 3. AUDIO ──────────────────────────────────────────────────────────────────
+
+  Checks the audio stream basics:
+    • Is there an audio stream at all? (missing audio = FAIL)
+    • Sample rate: 48000 Hz is universal for broadcast
+    • Channel layout: stereo vs mono
+    • Audio codec: PCM (uncompressed) for broadcast, AAC for web
+
+  Audio codec is a common mistake in post — AAC is fine for H.264 web exports
+  but will be rejected by most broadcast ingest systems that require PCM.
+
+
+  ── 4. AUDIO LOUDNESS (ebur128) ───────────────────────────────────────────────
+
+  This is the most technically complex check. ffmpeg's ebur128 filter measures:
+
+    Integrated loudness (LUFS)
+      The average perceived loudness of the whole file, measured in Loudness
+      Units relative to Full Scale (LUFS). The XR North America spec requires
+      -24.0 LUFS ±1.0 LU (window: -25.0 to -23.0 LUFS). This is the ATSC A/85
+      standard used by US broadcasters.
+
+      A file that's too loud (-13.5 LUFS on a -24 LUFS spec, as seen in the
+      PSA_30 file) will sound aggressively loud on air and may be auto-rejected.
+      A file that's too quiet will get buried under background noise.
+
+    True peak / Sample peak (dBTP / dBFS)
+      The absolute peak signal level. The spec requires -2 dBTP maximum.
+      Anything at or above 0 dBFS is clipping. A clipped file will have
+      distorted audio on air.
+
+      IMPORTANT LIMITATION: The Topaz ffmpeg build does not support true peak
+      measurement (peak=true_peak). The script uses sample peak instead, which
+      is a conservative proxy — true peak can only be equal to or higher than
+      sample peak. A sample peak of -7.2 dBFS is almost certainly safe.
+      A sample peak of 0.0 dBFS is definitely clipping.
+
+    Loudness range (LRA, in LU)
+      The dynamic range of the file. High LRA means the quiet and loud parts
+      differ a lot. Broadcasters may limit this to prevent jarring dynamics.
+      The XR NA spec does not set an LRA limit, so this is reported as info.
+
+  The LUFS measurement runs the entire file through the ebur128 filter, which
+  takes real time proportional to the file duration.
+
+
+  ── 5. BLACK FRAMES ───────────────────────────────────────────────────────────
+
+  Uses ffmpeg's blackdetect filter to find sequences of black frames longer
+  than 0.5 seconds (configurable). Reports the start time, end time, and
+  duration of each black segment.
+
+  Context matters here. The XR North America slate layout is:
+    5 seconds of slate → 2 seconds of black → the ad
+
+  So a black segment at the start (around t=5 to t=7) is expected and should
+  not be flagged as a problem. The script notes this in the output to avoid
+  false alarms. Any black section mid-ad is a genuine problem.
+
+  The -nostats flag is applied to suppress ffmpeg's progress output from
+  bleeding into the report.
+
+
+  ── 6. FREEZE DETECT ──────────────────────────────────────────────────────────
+
+  Uses ffmpeg's freezedetect filter to find sections where the video frame
+  does not change for more than 2 seconds. This catches:
+    • Encoding errors where frames were dropped and repeated
+    • Render errors where the timeline froze
+    • Accidental still frames in an edit
+
+  However, freeze detection also catches intentional title card holds — where
+  the editor deliberately holds on a frame for dramatic effect. The script
+  flags these with the message "confirm if intentional title card" rather than
+  auto-failing, because only an editor can make that call.
+
+  Example: The BCCHF PSA_30 file had a freeze at t=27s that turned out to be
+  an intentional title card — not an error.
+
+  Any freeze escalates the verdict to FLAG. Only a human reviewer can determine
+  if it should be treated as a FAIL.
+
+
+  ── 7. INTERLACE DETECTION (idet) ─────────────────────────────────────────────
+
+  Uses ffmpeg's idet (interlace detect) filter on the first 500 frames.
+  Reports counts of:
+    TFF  — Top Field First frames (interlaced)
+    BFF  — Bottom Field First frames (interlaced)
+    Progressive — Progressive frames
+
+  If any TFF or BFF frames are detected in a file that should be progressive,
+  the verdict escalates to FLAG. Interlaced content delivered to a progressive
+  broadcast pipeline causes combing artifacts on screen.
+
+  500 frames is enough to be statistically reliable without running the whole
+  file for a long-format piece.
+
+
+  ── 8. CROP DETECT ────────────────────────────────────────────────────────────
+
+  Uses ffmpeg's cropdetect filter to find the largest rectangle of non-black
+  content in the frame. If the crop rectangle is smaller than the full frame,
+  it means there are black borders — letterbox bars (top/bottom) or pillarbox
+  bars (left/right).
+
+  Black borders in a broadcast delivery are usually a mistake. They indicate
+  the source was the wrong aspect ratio and got letterboxed/pillarboxed into
+  the frame. They waste resolution and some broadcasters reject them.
+
+  cropdetect runs against a separate ffmpeg binary because the Topaz build
+  doesn't reliably support this filter. The script finds the right binary
+  automatically.
+
+
+  ── 9. COLOR SPACE METADATA ───────────────────────────────────────────────────
+
+  Reads the color space tags embedded in the video stream:
+    color_primaries  — which colour gamut (e.g. bt709, bt2020)
+    color_trc        — transfer characteristics / gamma curve (e.g. bt709, smpte2084)
+    colorspace       — matrix coefficients (e.g. bt709, bt2020nc)
+
+  If any of these are reported as 'unknown', the script flags it. Unknown
+  color space metadata means the receiving system (broadcaster, streaming
+  platform, display device) doesn't know how to interpret the colours correctly,
+  which can cause the image to look washed out, crushed, or colour-shifted.
+
+  For broadcast ProRes, all three should be bt709. Getting this wrong is
+  extremely common — many NLEs don't write these tags correctly by default,
+  and some colour grading workflows export without setting them explicitly.
+
+  The BCCHF files all had 'unknown' in the trc field (bt709/bt709/unknown)
+  even though the content appeared correct — this is a fixable export setting.
+
+
+  ── 10. TIMECODE ──────────────────────────────────────────────────────────────
+
+  Reads the timecode start value from the container metadata. Broadcast
+  deliveries often require a specific start timecode (e.g. 01:00:00:00 is
+  a common standard for US broadcast).
+
+  If EXPECTED_TIMECODE is set, the script compares the file's embedded timecode
+  against it and flags any mismatch. If no expected timecode is set, it simply
+  reports the observed value as information.
+
+  Drop-frame timecodes (using ; as separator) are normalised for comparison.
+
+
+  ── 11. SIGNAL STATS (signalstats) ────────────────────────────────────────────
+
+  This is the most comprehensive video signal analysis section. The ffmpeg
+  signalstats filter runs on every frame and outputs per-frame measurements for
+  every pixel in the image. Results are saved to signal.txt and then aggregated.
+
+  What is measured:
+
+    BRNG  — Broadcast Range violations
+            The percentage of pixels in each frame that fall outside the legal
+            signal range for the file's bit depth. Legal range prevents the
+            signal from exceeding what broadcast transmission hardware can carry.
+            Too-bright whites clip the signal; too-dark blacks go sub-black.
+
+            The EBU Rec.103-2000 standard (referenced in the XR NA spec) sets
+            a 1% tolerance — up to 1% of pixels can be out of range in active
+            picture without triggering a rejection. Above 1% is a flag; a peak
+            frame above 2% is a fail.
+
+    TOUT  — Temporal Outliers
+            Pixels that change value dramatically from one frame to the next
+            (more than expected for normal motion). High TOUT indicates
+            compression artifacts, noise, sensor issues, or codec errors.
+            Flagged if the average exceeds 0.5%.
+
+    YMIN  — The lowest luma (brightness) value seen in each frame.
+    YMAX  — The highest luma value seen in each frame.
+            These should stay within the legal range. Values below the floor
+            (sub-black) or above the ceiling (super-white) indicate out-of-range
+            content. The script also checks whether YMIN and YMAX are identical
+            across ALL frames — if so, it notes this as a likely codec artifact
+            or full-range encode, not genuine content.
+
+            Real content has varying YMIN and YMAX frame to frame. If every
+            single frame has exactly YMIN=4 and YMAX=1019, that means the
+            encoder wrote fixed sentinel values for the reserved sub-black and
+            super-white codepoints, which is a sign of full-range encoding
+            (wrong for broadcast delivery).
+
+    VREP  — Vertical Line Repetition
+            Detects repeated rows of pixels, which is a common artifact of
+            upscaling — if a video was rendered at a lower resolution and then
+            scaled up to delivery resolution, certain row patterns repeat.
+            High VREP (>5% average) is a strong indicator of upscaling.
+            The EFPC file had VREP of 15.8% — almost certainly upscaled.
+
+    SATMAX — Absolute peak saturation value
+            Extremely saturated colours can exceed the broadcast signal range
+            for chroma. Flagged if the peak saturation exceeds 200 (on a
+            0–255 scale for 10-bit content).
+
+  Per-frame data is written to signal.txt alongside the main report so you can
+  look at individual frames if you need to investigate a specific moment.
+
+
+================================================================================
+  THE VERDICT SYSTEM
+================================================================================
+
+  Each check independently escalates the verdict. At the end, the worst result
+  across all checks becomes the file's verdict.
+
+  ┌─────────────────────────────────────────────────────────────────────────┐
+  │  PASS  All checks within spec. File is ready to deliver.               │
+  │                                                                         │
+  │  FLAG  Something needs human review before delivery. The script is      │
+  │        telling you to look at something — it's not automatically a      │
+  │        rejection. Common examples:                                       │
+  │          • BRNG slightly over EBU 1% tolerance                          │
+  │          • Freeze detected — could be intentional title card            │
+  │          • Audio loudness slightly outside the ±1 LU window             │
+  │          • Color space tagged 'unknown' — fixable at export             │
+  │                                                                         │
+  │  FAIL  Hard spec violation. Will almost certainly be rejected at        │
+  │        delivery. Common examples:                                        │
+  │          • Wrong resolution or codec                                     │
+  │          • Audio clipping at 0 dBFS                                     │
+  │          • Luma outside legal range (full-range encode)                 │
+  └─────────────────────────────────────────────────────────────────────────┘
+
+
+================================================================================
+  WHAT MAKES THIS SCRIPT GOOD
+================================================================================
+
+  1. Comprehensive
+     Most broadcast QC tools check one or two things. This script checks eleven
+     categories in a single pass, covering video spec, audio spec, loudness,
+     luma legality, colour metadata, temporal issues, and codec integrity.
+
+  2. Spec-aware, not just informational
+     The script doesn't just report values — it evaluates them against the
+     spec you set and tells you clearly what passes and what doesn't. You don't
+     need to know what -24 LUFS means to understand "FAIL — 10.5 LU above target."
+
+  3. Built around real standards
+     The thresholds and logic are derived from real broadcast standards:
+       • ATSC A/85 / ITU-R BS.1770-3  (loudness metering)
+       • EBU Rec.103-2000             (broadcast range tolerance)
+       • Extreme Reach North America spec  (delivery requirements)
+     Not invented thresholds.
+
+  4. Handles edge cases correctly
+     • Pre-roll black: the 2-second black before an XR ad is expected —
+       the script knows this and notes it so you don't waste time chasing it
+     • Freeze vs title card: freeze is flagged for human review, not auto-failed
+     • YMIN/YMAX consistency: a subtle artifact that most tools miss entirely
+     • Full-range vs legal-range: detected via luma stats, not just metadata
+     • Sample peak as proxy: when true peak is unavailable, sample peak is
+       used with a note explaining the limitation and its implications
+
+  5. Flexible spec input
+     You can check against the built-in XR NA preset, a saved .conf file, a
+     parsed PDF or TXT specification document, or custom values entered at the
+     prompt. Spec files are saved and reused with --spec.
+
+  6. Non-interactive batch mode
+     --preset xr_na skips the prompt entirely for scripted or batch use.
+     Positional file arguments let you drag and drop any file without editing
+     the script. Results land beside each file automatically.
+
+  7. Clear, permanent output
+     Every run produces a timestamped qc_report.txt and a signal.txt with
+     per-frame data. Reports are human-readable and can be shared with
+     colorists, editors, or the broadcaster as documentation of QC.
+
+  8. Graceful degradation
+     If a binary is missing, that check is skipped with a warning — the script
+     doesn't crash. If a filter produces no output (silent file, short file),
+     it's noted. Timeouts prevent hung processes from blocking indefinitely.
+
+  9. Verdict is always the worst finding
+     The monotonic escalation system means you can trust the verdict. A FAIL
+     means something definitely failed — it can never be masked by a passing
+     check elsewhere.
+
+
+================================================================================
+  LIMITATIONS AND KNOWN ISSUES
+================================================================================
+
+  True peak measurement
+    The Topaz Video AI ffmpeg build does not support peak=true_peak in the
+    ebur128 filter. The script uses sample peak as a proxy. Sample peak is
+    always ≤ true peak, so a low sample peak gives confidence the file is safe.
+    A sample peak near or at 0 dBFS means clipping regardless.
+
+  Color space detection on H.264
+    H.264 streams embed color space tags differently. The parser may not
+    correctly extract them from MP4 containers. For H.264 web files, the
+    color space check is less reliable.
+
+  cropdetect requires a separate binary
+    The Topaz ffmpeg doesn't support cropdetect. If no alternative ffmpeg is
+    found, this check is skipped.
+
+  pdftotext not installed
+    PDF spec parsing uses pdftotext (poppler). If it's not installed, the
+    script falls back to strings (binary text extraction), which is messier.
+    Install poppler via: winget install poppler
+
+  Loudness measurement is real-time
+    ebur128 processes the whole file. A 30-second file takes about 30 seconds.
+    For long files, this is the slowest check.
+
+  VREP is only available in the signalstats filter
+    VREP detection requires signalstats with the vrep statistic enabled.
+    This works on the Topaz build.
+
+
+================================================================================
+
+  Script:  C:\Users\CarloPC\Scripts\broadcast_qc.sh
+  Notes:   C:\Users\CarloPC\Scripts\broadcast_qc_NOTES.txt
+  About:   C:\Users\CarloPC\Scripts\broadcast_qc_ABOUT.txt
+  Run:     bash /c/Users/CarloPC/Scripts/broadcast_qc.sh
+
+================================================================================
