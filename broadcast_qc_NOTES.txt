@@ -220,40 +220,7 @@
   PROJECT HISTORY
 ================================================================================
 
-  ── BCCHF  (2026-03-04) ────────────────────────────────────────────────────
-  Path:   D:\1129_BCCHF\6_COLOUR_IO\260304_BCCHF_COLOUR_PKG_V01\
-  Files:  BCCHF_15 / BCCHF_NONPSA_30 / BCCHF_PSA_30
-  Format: ProRes LT  4608x2592  10-bit  24fps  (colour reference files)
-  Spec:   XR North America (used as reference — format mismatch expected)
-
-  Results:
-    BCCHF_15         FAIL   LUFS -19.1 (too hot), BRNG 1.34%, YMIN/YMAX OOL
-    BCCHF_NONPSA_30  FAIL   LUFS -24.7 ✓, BRNG 1.31%, YMIN/YMAX OOL
-    BCCHF_PSA_30     FAIL   LUFS -13.5 + CLIP 0.0dBFS, freeze t=27s (title card)
-
-  Action items:
-    • All files: send back to colorist — full-range encode (YMIN=4/YMAX=1019)
-      every frame, needs legal-range grade + correct colorspace metadata
-    • PSA_30: audio mix needs fixing — severely clipped
-    • PSA_30: confirm freeze at t=27s is intentional title card with editor
-    • All files: colorspace tagged as 'unknown' — fix at export (bt709)
-
-  ── EFPC  (2026-03-05) ─────────────────────────────────────────────────────
-  Path:   F:\EFPC_PROJECT\9_FINAL_EXPORTS\DC\
-  File:   EFPC_H264_DC_V01.mp4
-  Format: H.264  2880x1440  8-bit  24fps  AAC  (web/social export)
-  Spec:   XR North America
-
-  Results:
-    EFPC_H264_DC_V01  FAIL
-
-  Action items:
-    • Wrong format — H.264 MP4, not ProRes. Not a broadcast master
-    • Wrong resolution — 2880x1440 (2:1 ratio, not 16:9 1080p)
-    • Audio clipping — sample peak +0.5 dBFS, LUFS -6.9 (17 LU too hot)
-    • Dead section at 1:12 — 3.8s black+freeze, needs editorial fix
-    • VREP 15.8% avg — likely upscaled from smaller source
-
+ 
 
 ================================================================================
   SAVED SPEC CONFIGS
@@ -275,3 +242,4 @@
   Run:     bash /c/Users/CarloPC/Scripts/broadcast_qc.sh
 
 ================================================================================
+
