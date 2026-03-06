@@ -1,7 +1,8 @@
 #!/bin/bash
 # =============================================================================
-# broadcast_qc.sh — Production broadcast QC pipeline v4.1
-# Requires: bash 4+, ffmpeg (Topaz), ffmpeg with cropdetect (OBS/standalone)
+# broadcast_qc.sh — Production broadcast QC pipeline v4.2
+# Requires: bash 4+, ffmpeg
+# Platforms: macOS, Linux, Windows (Git Bash)
 #
 # v4 additions:
 #   - Interactive spec prompt (resolution, fps, codec, audio, loudness, timecode)
@@ -18,22 +19,87 @@
 #   - Black frames section notes expected 2s pre-roll black (XR slate layout)
 # =============================================================================
 
-# --- Primary ffmpeg ----------------------------------------------------------
-FFMPEG="/c/Program Files/Topaz Labs LLC/Topaz Video AI/ffmpeg.exe"
+# --- Platform detection ------------------------------------------------------
+case "$(uname -s)" in
+  Darwin*)          PLATFORM="macos"   ;;
+  MINGW*|MSYS*|CYGWIN*) PLATFORM="windows" ;;
+  *)                PLATFORM="linux"   ;;
+esac
 
-# --- cropdetect ffmpeg: found dynamically, survives app updates --------------
-find_cropdetect_ffmpeg() {
-  local candidates=(
-    "/c/ffmpeg/bin/ffmpeg.exe"
-    "/c/Program Files/ffmpeg/bin/ffmpeg.exe"
-    "/usr/bin/ffmpeg"
-  )
+# --- Primary ffmpeg ----------------------------------------------------------
+# Honour FFMPEG env var if already set and executable
+find_primary_ffmpeg() {
+  [[ -n "${FFMPEG:-}" && -x "$FFMPEG" ]] && { echo "$FFMPEG"; return 0; }
+  local candidates=()
+  case "$PLATFORM" in
+    windows)
+      candidates=(
+        "/c/Program Files/Topaz Labs LLC/Topaz Video AI/ffmpeg.exe"
+        "/c/ffmpeg/bin/ffmpeg.exe"
+        "/c/Program Files/ffmpeg/bin/ffmpeg.exe"
+      )
+      ;;
+    macos)
+      candidates=(
+        "/opt/homebrew/bin/ffmpeg"
+        "/usr/local/bin/ffmpeg"
+      )
+      ;;
+    linux)
+      candidates=(
+        "/usr/bin/ffmpeg"
+        "/usr/local/bin/ffmpeg"
+      )
+      ;;
+  esac
   local path_ff
   path_ff=$(command -v ffmpeg 2>/dev/null || true)
   [[ -n "$path_ff" ]] && candidates+=("$path_ff")
-  while IFS= read -r -d '' f; do
-    candidates+=("$f")
-  done < <(find "/c/Users/CarloPC/AppData/Local/Overwolf" -name "ffmpeg.exe" -print0 2>/dev/null)
+  for ff in "${candidates[@]}"; do
+    [[ -x "$ff" ]] && { echo "$ff"; return 0; }
+  done
+  return 1
+}
+
+FFMPEG=$(find_primary_ffmpeg) || {
+  echo "ERROR: No ffmpeg found. Install ffmpeg or set the FFMPEG env var." >&2
+  exit 1
+}
+
+# --- cropdetect ffmpeg: found dynamically, survives app updates --------------
+find_cropdetect_ffmpeg() {
+  local candidates=()
+  case "$PLATFORM" in
+    windows)
+      candidates=(
+        "/c/ffmpeg/bin/ffmpeg.exe"
+        "/c/Program Files/ffmpeg/bin/ffmpeg.exe"
+      )
+      # Search Overwolf installs for bundled ffmpeg
+      local appdata="${LOCALAPPDATA:-$HOME/AppData/Local}"
+      appdata=$(echo "$appdata" | tr '\\' '/')
+      if [[ -d "$appdata/Overwolf" ]]; then
+        while IFS= read -r -d '' f; do
+          candidates+=("$f")
+        done < <(find "$appdata/Overwolf" -name "ffmpeg.exe" -print0 2>/dev/null)
+      fi
+      ;;
+    macos)
+      candidates=(
+        "/opt/homebrew/bin/ffmpeg"
+        "/usr/local/bin/ffmpeg"
+      )
+      ;;
+    linux)
+      candidates=(
+        "/usr/bin/ffmpeg"
+        "/usr/local/bin/ffmpeg"
+      )
+      ;;
+  esac
+  local path_ff
+  path_ff=$(command -v ffmpeg 2>/dev/null || true)
+  [[ -n "$path_ff" ]] && candidates+=("$path_ff")
   for ff in "${candidates[@]}"; do
     if [[ -x "$ff" ]] && "$ff" -filters 2>/dev/null | grep -q "cropdetect"; then
       echo "$ff"; return 0
@@ -45,9 +111,7 @@ find_cropdetect_ffmpeg() {
 FFMPEG_CROP=$(find_cropdetect_ffmpeg)
 
 # --- Validate binaries -------------------------------------------------------
-if [[ ! -x "$FFMPEG" ]]; then
-  echo "ERROR: Primary ffmpeg not found: $FFMPEG" >&2; exit 1
-fi
+echo "INFO: primary ffmpeg: $FFMPEG"
 if [[ -z "$FFMPEG_CROP" ]]; then
   echo "WARNING: No cropdetect-capable ffmpeg found — cropdetect will be skipped" >&2
   CROPDETECT_AVAILABLE=0
@@ -59,9 +123,17 @@ fi
 # --- Timeout wrapper ---------------------------------------------------------
 FFMPEG_TIMEOUT=300
 
+# Resolve timeout binary (macOS ships without timeout; use gtimeout from coreutils)
+TIMEOUT_CMD=""
+if command -v timeout >/dev/null 2>&1; then
+  TIMEOUT_CMD="timeout"
+elif command -v gtimeout >/dev/null 2>&1; then
+  TIMEOUT_CMD="gtimeout"
+fi
+
 run_ff() {
-  if [[ $FFMPEG_TIMEOUT -gt 0 ]] && command -v timeout >/dev/null 2>&1; then
-    timeout "$FFMPEG_TIMEOUT" "$@"
+  if [[ $FFMPEG_TIMEOUT -gt 0 && -n "$TIMEOUT_CMD" ]]; then
+    "$TIMEOUT_CMD" "$FFMPEG_TIMEOUT" "$@"
   else
     "$@"
   fi
@@ -318,7 +390,11 @@ prompt_spec() {
               # Fallback: strings strips binary, leaves readable text
               raw_text=$(strings "$spec_path" 2>/dev/null)
               echo " NOTE: pdftotext not found — using strings fallback."
-              echo "       Install poppler (winget install poppler) for full PDF support."
+              case "$PLATFORM" in
+                macos)   echo "       Install poppler: brew install poppler" ;;
+                linux)   echo "       Install poppler: sudo apt install poppler-utils  (or your distro equivalent)" ;;
+                windows) echo "       Install poppler: winget install poppler" ;;
+              esac
             fi
             [[ -n "$raw_text" ]] && _parse_spec_text "$raw_text" \
               || echo " WARN: Could not extract text from PDF."
@@ -903,7 +979,7 @@ run_qc() {
 # --- Argument parsing --------------------------------------------------------
 # Usage: broadcast_qc.sh [--preset xr_na] [--spec file.conf] [file1 file2 ...]
 #   Files passed as positional args are QC'd directly; results go beside each file
-#   With no file args, falls back to the hardcoded default project list below
+#   With no file args, prints usage and exits
 PRESET_ARG=""
 SPEC_FILE_ARG=""
 declare -a INPUT_FILES
@@ -917,11 +993,6 @@ while [[ $# -gt 0 ]]; do
     *)          INPUT_FILES+=("$(_norm_path "$1")"); shift ;;
   esac
 done
-
-# Default project (used when no files passed as args)
-BASE="/d/1129_BCCHF/6_COLOUR_IO/260304_BCCHF_COLOUR_PKG_V01"
-REF="$BASE/REF"
-QC="$BASE/QC_RESULTS"
 
 declare -a FILE_NAMES
 declare -A FILE_VERDICTS
@@ -946,6 +1017,24 @@ process_file() {
   fi
 }
 
+# Check for input files before prompting for spec
+if [[ ${#INPUT_FILES[@]} -eq 0 ]]; then
+  echo ""
+  echo "Usage: broadcast_qc.sh [OPTIONS] FILE [FILE ...]"
+  echo ""
+  echo "Options:"
+  echo "  --preset xr_na       Load XR North America preset (skip interactive prompt)"
+  echo "  --spec FILE.conf     Load a saved spec config file"
+  echo ""
+  echo "Examples:"
+  echo "  bash broadcast_qc.sh video.mov"
+  echo "  bash broadcast_qc.sh --preset xr_na file1.mov file2.mov"
+  echo "  bash broadcast_qc.sh --spec myspec.conf file.mov"
+  echo ""
+  echo "Results are saved to QC_RESULTS/<filename>/ beside each input file."
+  exit 0
+fi
+
 # Load spec: --preset flag > --spec flag > interactive prompt > skip
 if [[ -n "$PRESET_ARG" ]]; then
   case "$PRESET_ARG" in
@@ -965,19 +1054,11 @@ else
   echo "INFO: No spec set — running observe-only (use --preset xr_na or --spec file.conf)"
 fi
 
-if [[ ${#INPUT_FILES[@]} -gt 0 ]]; then
-  # Files passed as arguments — QC results go in a QC_RESULTS folder beside each file
-  for f in "${INPUT_FILES[@]}"; do
-    local_dir=$(dirname "$f")
-    name=$(basename "$f" | sed 's/\.[^.]*$//')
-    process_file "$f" "$name" "$local_dir/QC_RESULTS/$name"
-  done
-else
-  # Default project file list
-  process_file "$REF/BCCHF_15_PL_V01_PICTUREREF.mov"        "BCCHF_15"        "$QC/BCCHF_15"
-  process_file "$REF/BCCHF_NONPSA_30_PL_V01_PICTUREREF.mov" "BCCHF_NONPSA_30" "$QC/BCCHF_NONPSA_30"
-  process_file "$REF/BCCHF_PSA_30_PL_V01_PICTUREREF.mov"    "BCCHF_PSA_30"    "$QC/BCCHF_PSA_30"
-fi
+for f in "${INPUT_FILES[@]}"; do
+  local_dir=$(dirname "$f")
+  name=$(basename "$f" | sed 's/\.[^.]*$//')
+  process_file "$f" "$name" "$local_dir/QC_RESULTS/$name"
+done
 
 echo ""
 echo "============================================================"
